@@ -57,8 +57,8 @@ export async function putItem(i: Item & { date_local: string }) {
 }
 export async function dayItems(date_local: string) {
   const idx = (await db()).transaction('items').store.index('by_date')
-  const all: (Item & { date_local: string })[] = await idx.getAll(date_local as any)
-  return all
+  const all = await idx.getAll(date_local as any)
+  return all as Item[]
 }
 
 export async function putTotals(t: Totals) {
