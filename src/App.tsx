@@ -16,9 +16,14 @@ import {
   putServing,
   putTotals,
   getTargets,
-  setTargets
+  setTargets,
+  getAlias,
+  setAlias,
+  listAliases,
+  deleteAlias
 } from './lib/db'
-import type { Entry, Item, Totals, Targets } from './types'
+import { normalizePhrase, tryParseQtyUnit } from './lib/aliases'
+import type { Entry, Item, Totals, Targets, Alias } from './types'
 
 export default function App() {
   const [showScanner, setShowScanner] = useState(false)
@@ -27,6 +32,8 @@ export default function App() {
   const [totals, setTotals] = useState<Totals | null>(null)
   const [targets, setTargetsState] = useState<Targets | null>(null)
   const [showTable, setShowTable] = useState(false) // hidden by default
+  const [aliases, setAliases] = useState<Alias[]>([])
+
 
   const today = todayKey()
 
@@ -39,6 +46,26 @@ export default function App() {
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
+
+  const [showAliases, setShowAliases] = useState(false)
+
+  async function refreshAliases() {
+    const a = await listAliases()
+    setAliases(a)
+  }
+
+  useEffect(() => {
+    if (showAliases) {
+      refreshAliases()
+    }
+  }, [showAliases])
+  
+  async function handleDeleteAlias(phrase: string) {
+    const ok = window.confirm(`Delete alias "${phrase}"?`)
+    if (!ok) return
+    await deleteAlias(phrase)
+    await refreshAliases()
+  }
 
   async function refreshDay() {
     const it = await dayItems(today)
@@ -132,33 +159,104 @@ export default function App() {
     return Number.isFinite(v) ? v : null
   }
 
-  async function logFreeText() {
-    if (!freeText.trim()) return
-    // Phase 2B will implement: alias → LLM parser → resolver → items
-    // For now, keep manual item so logging still works.
-    const name = window.prompt('Food name (for display):', freeText.trim()) || 'Manual item'
-    const grams = Number(window.prompt('Grams:', '100') || '100')
-    const kcal = Number(window.prompt('kcal (optional):', '') || '0')
-    const protein = Number(window.prompt('protein g (optional):', '') || '0')
-    const carbs = Number(window.prompt('carbs g (optional):', '') || '0')
-    const fat = Number(window.prompt('fat g (optional):', '') || '0')
-    const fiber = Number(window.prompt('fiber g (optional):', '') || '0')
+async function logFreeText() {
+  const phraseRaw = freeText.trim()
+  if (!phraseRaw) return
+  const phraseNorm = normalizePhrase(phraseRaw)
 
-    const entry: Entry = { id: uuid(), timestamp_utc: new Date().toISOString(), date_local: today, text_raw: freeText.trim() }
+  // 1) Alias short-circuit
+  const hit = await getAlias(phraseNorm)
+  if (hit) {
+    // Resolve grams: prefer grams_override; else serving_label → lookup; else prompt grams
+    let grams: number | null = hit.grams_override ?? null
+    if (!grams && hit.serving_label) {
+      const servings = await getServings(hit.product_id)
+      const s = servings.find(x => x.label.toLowerCase() === hit.serving_label!.toLowerCase())
+      if (s) grams = s.grams
+    }
+    if (!grams) {
+      const maybe = window.prompt(`Enter grams for "${phraseRaw}"`, '100')
+      if (!maybe) return
+      grams = Math.max(1, Math.round(Number(maybe)))
+    }
+
+    const entry: Entry = {
+      id: uuid(),
+      timestamp_utc: new Date().toISOString(),
+      date_local: today,
+      text_raw: phraseRaw
+    }
     await createEntry(entry)
+
+    // For 2A we can’t fetch nutriments by product_id yet (resolver arrives in 2C),
+    // so we log grams with unknown macros (null) unless this product is 'custom'
     const item: Item & { date_local: string } = {
-      id: uuid(), entry_id: entry.id, product_id: 'custom:' + uuid(),
-      food_name: name, qty: 1, unit: 'g', grams,
-      kcal, protein_g: protein, carbs_g: carbs, fat_g: fat, fiber_g: fiber,
-      notes: 'manual', confidence: 1, date_local: today
+      id: uuid(),
+      entry_id: entry.id,
+      product_id: hit.product_id,
+      food_name: phraseRaw, // display user phrase (can refine in 2C)
+      qty: 1,
+      unit: 'g',
+      grams,
+      kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null,
+      notes: 'alias (macros pending resolver)',
+      confidence: 1,
+      date_local: today
     }
     await putItem(item)
+
     const t = await getTotals(today) ?? { date_local: today, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
-    t.kcal += item.kcal ?? 0; t.protein_g += item.protein_g ?? 0; t.carbs_g += item.carbs_g ?? 0; t.fat_g += item.fat_g ?? 0; t.fiber_g += item.fiber_g ?? 0
+    // Without macros, totals remain unchanged (we’ll backfill in 2C).
     await putTotals(t)
+
     setFreeText('')
     await refreshDay()
+    return
   }
+
+  // 2) No alias → current manual prompts (keeps you productive).
+  const qtyUnit = tryParseQtyUnit(phraseRaw) // might help suggest grams
+  const name = window.prompt('Food name (for display):', phraseRaw) || 'Manual item'
+  const grams = Number(window.prompt('Grams:', qtyUnit ? String(Math.round(qtyUnit.qty)) : '100') || '100')
+  const kcal = Number(window.prompt('kcal (optional):', '') || '0')
+  const protein = Number(window.prompt('protein g (optional):', '') || '0')
+  const carbs = Number(window.prompt('carbs g (optional):', '') || '0')
+  const fat = Number(window.prompt('fat g (optional):', '') || '0')
+  const fiber = Number(window.prompt('fiber g (optional):', '') || '0')
+
+  const entry: Entry = { id: uuid(), timestamp_utc: new Date().toISOString(), date_local: today, text_raw: phraseRaw }
+  await createEntry(entry)
+
+  const productId = 'custom:' + uuid()
+  const item: Item & { date_local: string } = {
+    id: uuid(), entry_id: entry.id, product_id: productId,
+    food_name: name, qty: 1, unit: 'g', grams,
+    kcal, protein_g: protein, carbs_g: carbs, fat_g: fat, fiber_g: fiber,
+    notes: 'manual', confidence: 1, date_local: today
+  }
+  await putItem(item)
+
+  const t = await getTotals(today) ?? { date_local: today, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
+  t.kcal += item.kcal ?? 0; t.protein_g += item.protein_g ?? 0; t.carbs_g += item.carbs_g ?? 0; t.fat_g += item.fat_g ?? 0; t.fiber_g += item.fiber_g ?? 0
+  await putTotals(t)
+  setFreeText('')
+  await refreshDay()
+
+  // 3) Offer to save an alias for next time
+  const save = window.confirm(`Save alias so "${phraseRaw}" logs automatically next time?`)
+  if (save) {
+    const gramsOverride = window.confirm('Bind grams to this alias so it logs without asking?')
+      ? grams
+      : null
+    await setAlias({
+      user_phrase: phraseNorm,
+      product_id: productId,
+      serving_label: null,
+      grams_override: gramsOverride
+    })
+  }
+}
+
 
   const dayHeader = useMemo(() => nowLj().toFormat('cccc, d LLL yyyy (ZZZZ)'), [])
 
@@ -195,7 +293,7 @@ export default function App() {
 
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="row" style={{ justifyContent: 'space-between' }}>
-          <h2 style={{ margin: 0 }}>Logged items (hidden)</h2>
+          <h2 style={{ margin: 0 }}>Logged items</h2>
           <button className="ghost" onClick={() => setShowTable(!showTable)}>{showTable ? 'Hide' : 'Show'}</button>
         </div>
         {showTable && (
@@ -228,6 +326,46 @@ export default function App() {
           </>
         )}
       </div>
+
+      <div style={{ marginTop: '2rem', borderTop: '1px solid #ccc', paddingTop: '1rem' }}>
+        <button onClick={() => setShowAliases(s => !s)}>
+          {showAliases ? 'Hide' : 'Show'} Aliases
+        </button>
+
+        {showAliases && (
+          <div style={{ marginTop: '1rem' }}>
+            <h3>Saved Aliases</h3>
+            {aliases.length === 0 && <p><em>No aliases saved.</em></p>}
+            {aliases.length > 0 && (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>Phrase</th>
+                    <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>Product ID</th>
+                    <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>Serving Label</th>
+                    <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc' }}>Grams Override</th>
+                    <th style={{ borderBottom: '1px solid #ccc' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {aliases.map(a => (
+                    <tr key={a.user_phrase}>
+                      <td>{a.user_phrase}</td>
+                      <td>{a.product_id}</td>
+                      <td>{a.serving_label || '-'}</td>
+                      <td>{a.grams_override ?? '-'}</td>
+                      <td>
+                        <button onClick={() => handleDeleteAlias(a.user_phrase)}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
+
 
       <p className="small">Barcode data: Open Food Facts (ODbL). Personal app; data stored locally on device.</p>
     </div>

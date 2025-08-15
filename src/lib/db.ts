@@ -1,5 +1,5 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb'
-import type { Entry, Item, Product, Serving, Totals, Targets } from '../types'
+import type { Entry, Item, Product, Serving, Totals, Targets, Alias } from '../types'
 
 interface Schema extends DBSchema {
   entries: { key: string; value: Entry; indexes: { date_local: string } }
@@ -7,14 +7,15 @@ interface Schema extends DBSchema {
   products: { key: string; value: Product; indexes: { by_barcode: string } }
   servings: { key: string; value: Serving; indexes: { by_product: string } }
   totals: { key: string; value: Totals }
-  settings: { key: string; value: any } // e.g., { key:'targets', value: Targets }
+  settings: { key: string; value: any }
+  aliases: { key: string; value: Alias } // key = user_phrase (normalized)
 }
 
 let dbp: Promise<IDBPDatabase<Schema>> | null = null
 
 export function db() {
   if (!dbp) {
-    dbp = openDB<Schema>('nutrition-logger', 2, {
+    dbp = openDB<Schema>('nutrition-logger', 3, {
       upgrade(d, oldVersion) {
         if (oldVersion < 1) {
           const entries = d.createObjectStore('entries', { keyPath: 'id' })
@@ -34,6 +35,9 @@ export function db() {
         }
         if (oldVersion < 2) {
           d.createObjectStore('settings', { keyPath: 'key' })
+        }
+        if (oldVersion < 3) {
+          d.createObjectStore('aliases', { keyPath: 'user_phrase' })
         }
       }
     })
@@ -61,16 +65,30 @@ export async function putTotals(t: Totals) { return (await db()).put('totals', t
 export async function getTotals(date_local: string) { return (await db()).get('totals', date_local) }
 
 // settings: targets
-const DEFAULT_TARGETS: Targets = { kcal: 2400, protein_g: 160, carbs_g: 260, fat_g: 80, fiber_g: 30 }
-
-export async function getTargets(): Promise<Targets> {
+import type { Targets as TTargets } from '../types'
+const DEFAULT_TARGETS: TTargets = { kcal: 2400, protein_g: 160, carbs_g: 260, fat_g: 80, fiber_g: 30 }
+export async function getTargets(): Promise<TTargets> {
   const rec = await (await db()).get('settings', 'targets')
   if (!rec) {
     await setTargets(DEFAULT_TARGETS)
     return DEFAULT_TARGETS
   }
-  return rec.value as Targets
+  return rec.value as TTargets
 }
-export async function setTargets(t: Targets) {
+export async function setTargets(t: TTargets) {
   return (await db()).put('settings', { key: 'targets', value: t })
+}
+
+// aliases
+export async function getAlias(phraseNorm: string) {
+  return (await db()).get('aliases', phraseNorm)
+}
+export async function setAlias(a: Alias) {
+  return (await db()).put('aliases', a)
+}
+export async function deleteAlias(phraseNorm: string) {
+  return (await db()).delete('aliases', phraseNorm)
+}
+export async function listAliases(): Promise<Alias[]> {
+  return (await db()).getAll('aliases')
 }

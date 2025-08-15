@@ -60,3 +60,10 @@ export interface Targets {
   fat_g: number
   fiber_g: number
 }
+
+export interface Alias {
+  user_phrase: string           // normalized key (lowercased, trimmed)
+  product_id: string            // maps to an existing product (off:/fdc:/nutrix:/custom:)
+  serving_label?: string | null // optional household measure label (e.g., "serving", "scoop")
+  grams_override?: number | null// if present, use this grams directly
+}
