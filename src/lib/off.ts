@@ -29,34 +29,32 @@ export async function fetchOFFByBarcode(ean: string) {
   return product
 }
 
-// NEW: lightweight text search (brand + name tokens)
 export async function searchOFF(query: string, pageSize = 10) {
-  const url = new URL('https://world.openfoodfacts.org/cgi/search.pl')
-  url.searchParams.set('search_simple', '1')
-  url.searchParams.set('json', '1')
-  url.searchParams.set('page_size', String(pageSize))
+  const url = new URL('https://world.openfoodfacts.org/api/v2/search')
+  url.searchParams.set('search', query) // free‑text
   url.searchParams.set('fields', 'code,product_name,brands,nutriments,serving_size')
-  url.searchParams.set('search_terms', query)
+  url.searchParams.set('page_size', String(pageSize))
+  url.searchParams.set('sort_by', 'unique_scans_n')
 
-  const res = await fetch(url.toString(), { headers: { 'User-Agent': 'nutrition-logger/1.0 (personal app)' } })
+  const res = await fetch(url.toString(), {
+    headers: { 'User-Agent': 'nutrition-logger/1.0 (personal app)' }
+  })
   if (!res.ok) throw new Error(`OFF search error ${res.status}`)
   const data = await res.json()
-  const products: (Product & { nutriments: any })[] = (data.products || []).map((p: any) => {
-    const brand = p.brands || undefined
-    const name = p.product_name || 'Unknown product'
-    return {
-      id: `off:${p.code}`,
-      source: 'off',
-      source_id: String(p.code),
-      brand, name,
-      barcode_ean: String(p.code),
-      default_serving_g: parseServingToGrams(p.serving_size) ?? undefined,
-      flavor: undefined,
-      version: 1,
-      attribution: 'Open Food Facts (ODbL)',
-      nutriments: p.nutriments ?? {}
-    }
-  })
+
+  const products: (Product & { nutriments: any })[] = (data.products || []).map((p: any) => ({
+    id: `off:${p.code}`,
+    source: 'off',
+    source_id: String(p.code),
+    brand: p.brands || undefined,
+    name: p.product_name || 'Unknown product',
+    barcode_ean: String(p.code),
+    default_serving_g: parseServingToGrams(p.serving_size) ?? undefined,
+    flavor: undefined,
+    version: 1,
+    attribution: 'Open Food Facts (ODbL)',
+    nutriments: p.nutriments ?? {}
+  }))
   return products
 }
 

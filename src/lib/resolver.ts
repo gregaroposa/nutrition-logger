@@ -35,13 +35,22 @@ export async function resolveOne(p: ParsedLike): Promise<ResolveResult> {
   // Nutritionix optional
   if (hasNutritionix) {
     const nx = await searchNutritionix(q, 6).catch(() => [])
-    for (const prod of nx) candidates.push(scoreCandidate(prod, p, 0.05)) // tiny penalty vs OFF
+    for (const prod of nx) candidates.push(scoreCandidate(prod, p, -0.05)) // tiny penalty vs OFF
   }
 
   // FDC optional (generics)
   if (hasFDC) {
     const fdc = await searchFDC(q, 6).catch(() => [])
-    for (const prod of fdc) candidates.push(scoreCandidate(prod, p, -0.05)) // tiny bonus to encourage generics
+    for (const prod of fdc) candidates.push(scoreCandidate(prod, p, +0.05)) // tiny bonus to encourage generics
+  }
+
+  const withEnergy = candidates.filter(c =>
+    typeof c.product.nutriments?.['energy-kcal_100g'] === 'number' ||
+    typeof c.product.nutriments?.['energy-kcal_serving'] === 'number'
+  )
+  if (withEnergy.length > 0) {
+    candidates.length = 0
+    candidates.push(...withEnergy)
   }
 
   // Rank by confidence desc
@@ -78,7 +87,7 @@ function scoreCandidate(prod: Product & { nutriments: any }, p: ParsedLike, bias
   const brandScore = p.brand ? jaccard(p.brand, prod.brand || '') : 0
   const labelCompleteness = completeness(prod)
   // combine
-  let conf = 0.60 * nameScore + 0.25 * brandScore + 0.15 * labelCompleteness + bias
+  let conf = 0.55 * nameScore + 0.15 * brandScore + 0.30 * labelCompleteness + bias
 
   // soft caps
   conf = Math.max(0, Math.min(1, conf))
@@ -89,7 +98,16 @@ function scoreCandidate(prod: Product & { nutriments: any }, p: ParsedLike, bias
 
 function completeness(prod: Product & { nutriments: any }) {
   const n = prod.nutriments || {}
-  const keys = ['energy-kcal_100g', 'proteins_100g', 'carbohydrates_100g', 'fat_100g']
-  const have = keys.filter((k) => typeof n[k] === 'number').length
-  return have / keys.length // 0..1
+  const pairs: [string, string][] = [
+    ['energy-kcal_100g', 'energy-kcal_serving'],
+    ['proteins_100g',    'proteins_serving'],
+    ['carbohydrates_100g','carbohydrates_serving'],
+    ['fat_100g',         'fat_serving']
+  ]
+  let have = 0
+  for (const [per100, perServ] of pairs) {
+    if (typeof n[per100] === 'number' || typeof n[perServ] === 'number') have++
+  }
+  return have / pairs.length // 0..1
 }
+

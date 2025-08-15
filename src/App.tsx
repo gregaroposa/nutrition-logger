@@ -132,9 +132,10 @@ export default function App() {
     }
     await createEntry(entry)
 
-    const macros = nutriments ? macrosFromPer100g(nutriments, grams) : {
-      kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null
-    }
+    const macros = nutriments
+      ? macrosFromPer100g(nutriments, grams, product.default_serving_g ?? undefined)
+      : { kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null }
+
 
     const item: Item & { date_local: string } = {
       id: uuid(),
@@ -144,8 +145,12 @@ export default function App() {
       qty: 1,
       unit: 'g',
       grams,
-      ...macros,
-      notes: macros.kcal == null ? 'Macros unavailable from source' : null,
+      kcal: (macros.kcal ?? null),
+      protein_g: (macros.protein_g ?? null),
+      carbs_g: (macros.carbs_g ?? null),
+      fat_g: (macros.fat_g ?? null),
+      fiber_g: (macros.fiber_g ?? null),
+      notes: (macros.kcal ?? null) === null ? 'Macros unavailable from source' : null,
       confidence: 1,
       date_local: today
     }
@@ -184,7 +189,12 @@ async function logResolvedProduct(entryId: string, phraseForDisplay: string, pic
     attribution: picked.product.attribution
   })
 
-  const macros = macrosFromPer100g(picked.product.nutriments || {}, grams)
+  const macros = macrosFromPer100g(
+    picked.product.nutriments || {},
+    grams,
+    picked.product.default_serving_g ?? undefined
+  )
+
   const item: Item & { date_local: string } = {
     id: uuid(),
     entry_id: entryId,
@@ -193,12 +203,12 @@ async function logResolvedProduct(entryId: string, phraseForDisplay: string, pic
     qty: 1,
     unit: 'g',
     grams,
-    kcal: macros.kcal,
-    protein_g: macros.protein_g,
-    carbs_g: macros.carbs_g,
-    fat_g: macros.fat_g,
-    fiber_g: macros.fiber_g,
-    notes: macros.kcal == null ? 'Macros unavailable from source' : null,
+    kcal: macros.kcal ?? null,
+    protein_g: macros.protein_g ?? null,
+    carbs_g: macros.carbs_g ?? null,
+    fat_g: macros.fat_g ?? null,
+    fiber_g: macros.fiber_g ?? null,
+    notes: (macros.kcal ?? null) === null ? 'Macros unavailable from source' : null,
     confidence: picked.confidence,
     date_local: today
   }

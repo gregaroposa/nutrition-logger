@@ -1,30 +1,33 @@
-type Nutriments = Record<string, any>
-
-export function macrosFromPer100g(n: Nutriments, grams: number) {
-  // OFF fields (when available). Fallback converts kJ→kcal.
-  const kcal100 =
-    n['energy-kcal_100g'] ??
-    (typeof n['energy_100g'] === 'number' ? n['energy_100g'] * 0.239006 : null)
-
-  const protein100 = n['proteins_100g'] ?? null
-  const carbs100 = n['carbohydrates_100g'] ?? null
-  const fat100 = n['fat_100g'] ?? null
-  const fiber100 = n['fiber_100g'] ?? null
-
-  const scale = grams / 100
-  const round = (v: number | null) => (v == null ? null : Math.round(v * scale))
-
-  return {
-    kcal: round(kcal100),
-    protein_g: vround(protein100, scale),
-    carbs_g: vround(carbs100, scale),
-    fat_g: vround(fat100, scale),
-    fiber_g: vround(fiber100, scale)
-  }
+// src/lib/nutrition.ts
+type Maybe = number | null
+const num = (v: any): number | null => {
+  if (v === null || v === undefined) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
 }
 
-function vround(v: number | null, scale: number) {
-  if (v == null) return null
-  const x = v * scale
-  return Math.round(x * 10) / 10
+/** Prefer per‑100g; fall back to per‑serving using serving grams. */
+export function macrosFromPer100g(
+  nutriments: Record<string, any>,
+  grams: number,
+  servingG?: number
+) {
+  function calc(k100: string, kserv: string): Maybe {
+    const v100 = num(nutriments[`${k100}_100g`])
+    if (v100 !== null) return (v100 * grams) / 100
+
+    const vserv = num(nutriments[`${kserv}_serving`])
+    const sg = servingG ?? num((nutriments as any)['serving_size_g']) ?? null
+    if (vserv !== null && sg !== null && sg > 0) return vserv * (grams / sg)
+
+    return null
+  }
+
+  return {
+    kcal:      calc('energy-kcal', 'energy-kcal'),
+    protein_g: calc('proteins',    'proteins'),
+    carbs_g:   calc('carbohydrates','carbohydrates'),
+    fat_g:     calc('fat',         'fat'),
+    fiber_g:   calc('fiber',       'fiber')
+  }
 }
