@@ -266,7 +266,8 @@ async function logFreeText() {
         if (!ask) continue
         grams = Math.max(1, Math.round(Number(ask)))
       }
-
+      
+      
       // resolve to a product
       const result = await resolveOne({ name: p.name, brand: p.brand, qty: p.qty, unit: p.unit, grams })
 
@@ -500,7 +501,7 @@ async function logFreeText() {
           onCancel={() => pendingChoice.resume(null)}
         />
       )}
-      
+
       <p className="small">Barcode data: Open Food Facts (ODbL). Personal app; data stored locally on device.</p>
     </div>
   )

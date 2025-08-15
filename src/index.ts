@@ -1,6 +1,8 @@
 // src/index.ts
 import { z } from 'zod'
 
+const ALLOWED_UNITS = new Set(['g','gram','grams','ml','milliliter','milliliters','scoop','serving','slice','cup','x'])
+
 /** ---------- Schemas ---------- */
 
 // REQUEST
@@ -48,6 +50,11 @@ function sanitize(looseObj: unknown): z.infer<typeof RespStrict> {
       const qty = toNumber(i.qty)
       if (qty !== undefined) out.qty = qty
       if (i.unit) out.unit = i.unit.trim()
+      if (i.unit) {
+        const u = i.unit.trim().toLowerCase()
+        if (ALLOWED_UNITS.has(u)) out.unit = u
+        // else: drop weird units like "lid" (brand fragment)
+      }
       const grams = toNumber(i.grams)
       if (grams !== undefined) out.grams = grams
       if (i.notes) out.notes = i.notes.trim()
@@ -78,6 +85,8 @@ function buildSystemPrompt() {
     '- qty and grams MUST be numbers (not strings).',
     '- If a field is unknown, OMIT it (do NOT use null).',
     '- Do NOT include calories or macros.',
+    '- Units MUST be one of: g, ml, scoop, serving, slice, cup, x. If no unit from this list is present, omit unit.',
+    '- Never infer a unit from a brand name (e.g., "Lidl" is a brand, not a unit).',
     'If grams are explicitly stated (e.g., "200 g"), set grams.',
     'When only household units (e.g., "1 scoop") are present, keep qty/unit and OMIT grams.',
     'Split the text into multiple items if separated by "+" or commas.',
