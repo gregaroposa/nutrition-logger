@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import BarcodeScanner from './components/BarcodeScanner'
 import RemainingToday from './components/RemainingToday'
+import DisambiguationModal from './components/DisambiguationModal'
 import { fetchOFFByBarcode } from './lib/off'
 import { macrosFromPer100g } from './lib/nutrition'
 import { nowLj, todayKey } from './lib/tz'
+import { resolveOne, type Candidate } from './lib/resolver'
 import { v4 as uuid } from './uuid4'
 import {
   createEntry,
@@ -23,6 +25,7 @@ import {
   deleteAlias
 } from './lib/db'
 import { normalizePhrase, tryParseQtyUnit } from './lib/aliases'
+import { parseFreeText } from './lib/parser'
 import type { Entry, Item, Totals, Targets, Alias } from './types'
 
 export default function App() {
@@ -33,6 +36,13 @@ export default function App() {
   const [targets, setTargetsState] = useState<Targets | null>(null)
   const [showTable, setShowTable] = useState(false) // hidden by default
   const [aliases, setAliases] = useState<Alias[]>([])
+  const [pendingChoice, setPendingChoice] = useState<{
+    phrase: string
+    parsed: { name: string; brand?: string; grams?: number }
+    choices: Candidate[]
+    resume: (picked: Candidate | null) => void
+  } | null>(null)
+
 
 
   const today = todayKey()
@@ -159,15 +169,59 @@ export default function App() {
     return Number.isFinite(v) ? v : null
   }
 
+async function logResolvedProduct(entryId: string, phraseForDisplay: string, picked: Candidate, grams: number) {
+  // cache product if not present locally (by id key)
+  await putProduct({
+    id: picked.product.id,
+    source: picked.product.source,
+    source_id: picked.product.source_id,
+    brand: picked.product.brand,
+    name: picked.product.name,
+    barcode_ean: picked.product.barcode_ean ?? null,
+    default_serving_g: picked.product.default_serving_g ?? null,
+    flavor: picked.product.flavor ?? null,
+    version: 1,
+    attribution: picked.product.attribution
+  })
+
+  const macros = macrosFromPer100g(picked.product.nutriments || {}, grams)
+  const item: Item & { date_local: string } = {
+    id: uuid(),
+    entry_id: entryId,
+    product_id: picked.product.id,
+    food_name: [picked.product.brand, picked.product.name].filter(Boolean).join(' — ') || phraseForDisplay,
+    qty: 1,
+    unit: 'g',
+    grams,
+    kcal: macros.kcal,
+    protein_g: macros.protein_g,
+    carbs_g: macros.carbs_g,
+    fat_g: macros.fat_g,
+    fiber_g: macros.fiber_g,
+    notes: macros.kcal == null ? 'Macros unavailable from source' : null,
+    confidence: picked.confidence,
+    date_local: today
+  }
+  await putItem(item)
+
+  const t = await getTotals(today) ?? { date_local: today, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
+  t.kcal += item.kcal ?? 0
+  t.protein_g += item.protein_g ?? 0
+  t.carbs_g += item.carbs_g ?? 0
+  t.fat_g += item.fat_g ?? 0
+  t.fiber_g += item.fiber_g ?? 0
+  await putTotals(t)
+}
+
+
 async function logFreeText() {
   const phraseRaw = freeText.trim()
   if (!phraseRaw) return
   const phraseNorm = normalizePhrase(phraseRaw)
 
-  // 1) Alias short-circuit
+  // 1) Alias short-circuit (2A)
   const hit = await getAlias(phraseNorm)
   if (hit) {
-    // Resolve grams: prefer grams_override; else serving_label → lookup; else prompt grams
     let grams: number | null = hit.grams_override ?? null
     if (!grams && hit.serving_label) {
       const servings = await getServings(hit.product_id)
@@ -180,42 +234,113 @@ async function logFreeText() {
       grams = Math.max(1, Math.round(Number(maybe)))
     }
 
-    const entry: Entry = {
-      id: uuid(),
-      timestamp_utc: new Date().toISOString(),
-      date_local: today,
-      text_raw: phraseRaw
-    }
+    const entry: Entry = { id: uuid(), timestamp_utc: new Date().toISOString(), date_local: today, text_raw: phraseRaw }
     await createEntry(entry)
 
-    // For 2A we can’t fetch nutriments by product_id yet (resolver arrives in 2C),
-    // so we log grams with unknown macros (null) unless this product is 'custom'
     const item: Item & { date_local: string } = {
-      id: uuid(),
-      entry_id: entry.id,
-      product_id: hit.product_id,
-      food_name: phraseRaw, // display user phrase (can refine in 2C)
-      qty: 1,
-      unit: 'g',
-      grams,
+      id: uuid(), entry_id: entry.id, product_id: hit.product_id,
+      food_name: phraseRaw, qty: 1, unit: 'g', grams,
       kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null,
-      notes: 'alias (macros pending resolver)',
-      confidence: 1,
-      date_local: today
+      notes: 'alias (macros pending resolver)', confidence: 1, date_local: today
     }
     await putItem(item)
-
     const t = await getTotals(today) ?? { date_local: today, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
-    // Without macros, totals remain unchanged (we’ll backfill in 2C).
     await putTotals(t)
+    setFreeText('')
+    await refreshDay()
+    return
+  }
+
+  // 2) No alias → try LLM parser (2B) + resolver (2C)
+  const parsed = await parseFreeText(phraseRaw)
+
+  if (parsed && parsed.length > 0) {
+    const entry: Entry = { id: uuid(), timestamp_utc: new Date().toISOString(), date_local: today, text_raw: phraseRaw }
+    await createEntry(entry)
+
+    for (const p of parsed) {
+      // grams: from parser if present else ask once
+      let grams = p.grams
+      if (!grams) {
+        const ask = window.prompt(`Grams for "${[p.brand, p.name].filter(Boolean).join(' — ') || p.name}"`, '100')
+        if (!ask) continue
+        grams = Math.max(1, Math.round(Number(ask)))
+      }
+
+      // resolve to a product
+      const result = await resolveOne({ name: p.name, brand: p.brand, qty: p.qty, unit: p.unit, grams })
+
+      if (result.status === 'ok' && result.best) {
+        await logResolvedProduct(entry.id, p.name, result.best, grams)
+        // auto‑save alias for the full phrase on confident hits
+        if (result.best.confidence >= 0.80) {
+          await setAlias({
+            user_phrase: normalizePhrase(phraseRaw),
+            product_id: result.best.product.id,
+            serving_label: null,
+            grams_override: grams
+          })
+        }
+      } else if (result.status === 'choices' && result.choices && result.choices.length > 0) {
+        // show modal and wait for user pick
+        const picked = await new Promise<Candidate | null>((resolve) => {
+          setPendingChoice({
+            phrase: p.name,
+            parsed: { name: p.name, brand: p.brand, grams },
+            choices: result.choices!,
+            resume: resolve
+          })
+        })
+        setPendingChoice(null)
+        if (picked) {
+          await logResolvedProduct(entry.id, p.name, picked, grams)
+          // save alias on user confirmation too
+          await setAlias({
+            user_phrase: normalizePhrase(phraseRaw),
+            product_id: picked.product.id,
+            serving_label: null,
+            grams_override: grams
+          })
+        } else {
+          // user cancelled; skip this item
+          continue
+        }
+      } else {
+        // ask for more info (brand/variant)
+        const more = window.prompt(`Couldn’t resolve "${p.name}". Add brand/variant and try again:`, [p.brand, p.name].filter(Boolean).join(' '))
+        if (more) {
+          const again = await resolveOne({ name: more, grams })
+          if (again.status === 'ok' && again.best) {
+            await logResolvedProduct(entry.id, more, again.best, grams)
+          } else {
+            // fallback to manual item with unknown macros
+            const item: Item & { date_local: string } = {
+              id: uuid(),
+              entry_id: entry.id,
+              product_id: 'parsed:' + uuid(),
+              food_name: more,
+              qty: 1,
+              unit: 'g',
+              grams,
+              kcal: null, protein_g: null, carbs_g: null, fat_g: null, fiber_g: null,
+              notes: 'unresolved',
+              confidence: 0.3,
+              date_local: today
+            }
+            await putItem(item)
+          }
+        }
+      }
+    }
 
     setFreeText('')
     await refreshDay()
     return
   }
 
-  // 2) No alias → current manual prompts (keeps you productive).
-  const qtyUnit = tryParseQtyUnit(phraseRaw) // might help suggest grams
+
+  // 3) Parser failed → fallback to your manual prompts (keeps you productive)
+  const qtyUnit = tryParseQtyUnit(phraseRaw)
   const name = window.prompt('Food name (for display):', phraseRaw) || 'Manual item'
   const grams = Number(window.prompt('Grams:', qtyUnit ? String(Math.round(qtyUnit.qty)) : '100') || '100')
   const kcal = Number(window.prompt('kcal (optional):', '') || '0')
@@ -235,19 +360,15 @@ async function logFreeText() {
     notes: 'manual', confidence: 1, date_local: today
   }
   await putItem(item)
-
   const t = await getTotals(today) ?? { date_local: today, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
   t.kcal += item.kcal ?? 0; t.protein_g += item.protein_g ?? 0; t.carbs_g += item.carbs_g ?? 0; t.fat_g += item.fat_g ?? 0; t.fiber_g += item.fiber_g ?? 0
   await putTotals(t)
   setFreeText('')
   await refreshDay()
 
-  // 3) Offer to save an alias for next time
   const save = window.confirm(`Save alias so "${phraseRaw}" logs automatically next time?`)
   if (save) {
-    const gramsOverride = window.confirm('Bind grams to this alias so it logs without asking?')
-      ? grams
-      : null
+    const gramsOverride = window.confirm('Bind grams to this alias so it logs without asking?') ? grams : null
     await setAlias({
       user_phrase: phraseNorm,
       product_id: productId,
@@ -256,6 +377,7 @@ async function logFreeText() {
     })
   }
 }
+
 
 
   const dayHeader = useMemo(() => nowLj().toFormat('cccc, d LLL yyyy (ZZZZ)'), [])
@@ -365,8 +487,20 @@ async function logFreeText() {
           </div>
         )}
       </div>
-
-
+      
+      {pendingChoice && (
+        <DisambiguationModal
+          userPhrase={
+            pendingChoice.parsed.brand
+              ? `${pendingChoice.parsed.brand} ${pendingChoice.parsed.name}`
+              : pendingChoice.parsed.name
+          }
+          choices={pendingChoice.choices}
+          onPick={(c) => pendingChoice.resume(c)}
+          onCancel={() => pendingChoice.resume(null)}
+        />
+      )}
+      
       <p className="small">Barcode data: Open Food Facts (ODbL). Personal app; data stored locally on device.</p>
     </div>
   )

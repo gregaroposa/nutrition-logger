@@ -1,0 +1,9 @@
+name = "nutrition-parser"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+
+[vars]
+# You can add static vars here if you like
+
+[observability]
+enabled = true

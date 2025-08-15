@@ -1,0 +1,19 @@
+{
+  "name": "nutrition-parser",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:remote": "wrangler dev --remote",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "wrangler": "^4.30.0"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}
